@@ -67,6 +67,10 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
 
   public static final String EXTRA_FIELD_SCHEMA =
       "{\"name\": \"new_field\", \"type\": \"boolean\", \"default\": false},";
+  public static final String EXTRA_FIELD_WITHOUT_DEFAULT_SCHEMA =
+      "{\"name\": \"new_field_without_default\", \"type\": \"boolean\"},";
+  public static final String EXTRA_FIELD_NULLABLE_SCHEMA =
+      ",{\"name\": \"new_field_without_default\", \"type\": [\"boolean\", \"null\"]}";
 
   // TRIP_EXAMPLE_SCHEMA with a new_field added
   public static final String TRIP_EXAMPLE_SCHEMA_EVOLVED = TRIP_SCHEMA_PREFIX + EXTRA_TYPE_SCHEMA + MAP_TYPE_SCHEMA
@@ -143,6 +147,16 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
         + TRIP_SCHEMA_SUFFIX;
     assertTrue(TableSchemaResolver.isSchemaCompatible(TRIP_EXAMPLE_SCHEMA, multipleAddedFieldSchema),
         "Multiple added fields with defauls are compatible");
+
+    assertFalse(TableSchemaResolver.isSchemaCompatible(TRIP_EXAMPLE_SCHEMA,
+        TRIP_SCHEMA_PREFIX + EXTRA_TYPE_SCHEMA + MAP_TYPE_SCHEMA
+            + FARE_NESTED_SCHEMA + TIP_NESTED_SCHEMA + EXTRA_FIELD_WITHOUT_DEFAULT_SCHEMA + TRIP_SCHEMA_SUFFIX),
+        "Added field without default and not nullable is not compatible (Evolved Schema)");
+
+    assertTrue(TableSchemaResolver.isSchemaCompatible(TRIP_EXAMPLE_SCHEMA,
+        TRIP_SCHEMA_PREFIX + EXTRA_TYPE_SCHEMA + MAP_TYPE_SCHEMA
+            + FARE_NESTED_SCHEMA + TIP_NESTED_SCHEMA + TRIP_SCHEMA_SUFFIX + EXTRA_FIELD_NULLABLE_SCHEMA),
+        "Added nullable field is compatible (Evolved Schema)");
   }
 
   @Test
@@ -289,7 +303,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
 
     // Insert with original schema is allowed now
     insertBatch(hoodieWriteConfig, client, "009", "008", numRecords, SparkRDDWriteClient::insert,
-        false, false, 0, 0, 0);
+        false, false, 0, 0, 0, Option.empty());
     checkLatestDeltaCommit("009");
     checkReadRecords("000", 3 * numRecords);
   }
@@ -302,7 +316,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
       .setTimelineLayoutVersion(VERSION_1)
       .initTable(metaClient.getHadoopConf(), metaClient.getBasePath());
 
-    HoodieWriteConfig hoodieWriteConfig = getWriteConfig(TRIP_EXAMPLE_SCHEMA);
+    HoodieWriteConfig hoodieWriteConfig = getWriteConfigBuilder(TRIP_EXAMPLE_SCHEMA).withRollbackUsingMarkers(false).build();
     SparkRDDWriteClient client = getHoodieWriteClient(hoodieWriteConfig);
 
     // Initial inserts with TRIP_EXAMPLE_SCHEMA
@@ -424,7 +438,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
 
     // Insert with original schema is allowed now
     insertBatch(hoodieWriteConfig, client, "007", "003", numRecords, SparkRDDWriteClient::insert,
-        false, true, numRecords, 2 * numRecords, 1);
+        false, true, numRecords, 2 * numRecords, 1, Option.empty());
     checkReadRecords("000", 2 * numRecords);
 
     // Update with original schema is allowed now
@@ -437,7 +451,7 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
   private void checkReadRecords(String instantTime, int numExpectedRecords) throws IOException {
     if (tableType == HoodieTableType.COPY_ON_WRITE) {
       HoodieTimeline timeline = metaClient.reloadActiveTimeline().getCommitTimeline();
-      assertEquals(numExpectedRecords, HoodieClientTestUtils.countRecordsSince(jsc, basePath, sqlContext, timeline, instantTime));
+      assertEquals(numExpectedRecords, HoodieClientTestUtils.countRecordsOptionallySince(jsc, basePath, sqlContext, timeline, Option.of(instantTime)));
     } else {
       // TODO: This code fails to read records under the following conditions:
       // 1. No parquet files yet (i.e. no compaction done yet)
@@ -493,11 +507,14 @@ public class TestTableSchemaEvolution extends HoodieClientTestBase {
   }
 
   private HoodieWriteConfig getWriteConfig(String schema) {
+    return getWriteConfigBuilder(schema).build();
+  }
+
+  private HoodieWriteConfig.Builder getWriteConfigBuilder(String schema) {
     return getConfigBuilder(schema)
         .withIndexConfig(HoodieIndexConfig.newBuilder().withIndexType(IndexType.INMEMORY).build())
         .withCompactionConfig(HoodieCompactionConfig.newBuilder().withMaxNumDeltaCommitsBeforeCompaction(1).build())
-        .withAvroSchemaValidate(true)
-        .build();
+        .withAvroSchemaValidate(true);
   }
 
   @Override

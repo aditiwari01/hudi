@@ -18,6 +18,8 @@
 
 package org.apache.hudi.common.table.timeline;
 
+import org.apache.hudi.common.model.HoodieCommitMetadata;
+import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.common.table.timeline.HoodieInstant.State;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.common.util.Option;
@@ -101,6 +103,12 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   }
 
   @Override
+  public HoodieTimeline filterCompletedInstantsWithCommitMetadata() {
+    return new HoodieDefaultTimeline(instants.stream().filter(HoodieInstant::isCompleted)
+            .filter(i -> !isDeletePartitionType(i)), details);
+  }
+
+  @Override
   public HoodieTimeline filterCompletedAndCompactionInstants() {
     return new HoodieDefaultTimeline(instants.stream().filter(s -> s.isCompleted()
             || s.getAction().equals(HoodieTimeline.COMPACTION_ACTION)), details);
@@ -125,9 +133,15 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   }
 
   @Override
+  public HoodieTimeline filterPendingRollbackTimeline() {
+    return new HoodieDefaultTimeline(instants.stream().filter(
+        s -> s.getAction().equals(HoodieTimeline.ROLLBACK_ACTION) && !s.isCompleted()), details);
+  }
+
+  @Override
   public HoodieTimeline filterPendingCompactionTimeline() {
     return new HoodieDefaultTimeline(
-        instants.stream().filter(s -> s.getAction().equals(HoodieTimeline.COMPACTION_ACTION)), details);
+        instants.stream().filter(s -> s.getAction().equals(HoodieTimeline.COMPACTION_ACTION) && !s.isCompleted()), details);
   }
 
   @Override
@@ -229,7 +243,14 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
    */
   public HoodieTimeline getRollbackTimeline() {
     return new HoodieDefaultTimeline(filterInstantsByAction(ROLLBACK_ACTION),
-            (Function<HoodieInstant, Option<byte[]>> & Serializable) this::getInstantDetails);
+        (Function<HoodieInstant, Option<byte[]>> & Serializable) this::getInstantDetails);
+  }
+
+  /**
+   * Get only the rollback and restore action (inflight and completed) in the active timeline.
+   */
+  public HoodieTimeline getRollbackAndRestoreTimeline() {
+    return  getTimelineOfActions(CollectionUtils.createSet(ROLLBACK_ACTION, RESTORE_ACTION));
   }
 
   /**
@@ -265,6 +286,12 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   @Override
   public Option<HoodieInstant> firstInstant() {
     return Option.fromJavaOptional(instants.stream().findFirst());
+  }
+
+  @Override
+  public Option<HoodieInstant> firstInstant(String action, State state) {
+    return Option.fromJavaOptional(instants.stream()
+        .filter(s -> action.equals(s.getAction()) && state.equals(s.getState())).findFirst());
   }
 
   @Override
@@ -330,6 +357,21 @@ public class HoodieDefaultTimeline implements HoodieTimeline {
   @Override
   public Option<byte[]> getInstantDetails(HoodieInstant instant) {
     return details.apply(instant);
+  }
+
+  @Override
+  public boolean isDeletePartitionType(HoodieInstant instant) {
+    Option<WriteOperationType> operationType;
+
+    try {
+      HoodieCommitMetadata commitMetadata = HoodieCommitMetadata
+              .fromBytes(getInstantDetails(instant).get(), HoodieCommitMetadata.class);
+      operationType = Option.of(commitMetadata.getOperationType());
+    } catch (Exception e) {
+      operationType = Option.empty();
+    }
+
+    return operationType.isPresent() && WriteOperationType.DELETE_PARTITION.equals(operationType.get());
   }
 
   @Override

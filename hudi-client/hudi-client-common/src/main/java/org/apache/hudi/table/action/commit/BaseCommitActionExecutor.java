@@ -33,6 +33,7 @@ import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieInstant.State;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
 import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.exception.HoodieCommitException;
@@ -90,7 +91,7 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload, I,
     try {
       HoodieCommitMetadata metadata = new HoodieCommitMetadata();
       profile.getPartitionPaths().forEach(path -> {
-        WorkloadStat partitionStat = profile.getWorkloadStat(path.toString());
+        WorkloadStat partitionStat = profile.getWorkloadStat(path);
         HoodieWriteStat insertStat = new HoodieWriteStat();
         insertStat.setNumInserts(partitionStat.getNumInserts());
         insertStat.setFileId("");
@@ -123,7 +124,20 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload, I,
     return  table.getMetaClient().getCommitActionType();
   }
 
+
+  /**
+   * Check if any validators are configured and run those validations. If any of the validations fail, throws HoodieValidationException.
+   */
+  protected void runPrecommitValidators(HoodieWriteMetadata<O> writeMetadata) {
+    if (StringUtils.isNullOrEmpty(config.getPreCommitValidators())) {
+      return;
+    }
+    throw new HoodieIOException("Precommit validation not implemented for all engines yet");
+  }
+  
   protected void commitOnAutoCommit(HoodieWriteMetadata result) {
+    // validate commit action before committing result
+    runPrecommitValidators(result);
     if (config.shouldAutoCommit()) {
       LOG.info("Auto commit enabled: Committing " + instantTime);
       autoCommit(extraMetadata, result);
@@ -133,14 +147,16 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload, I,
   }
 
   protected void autoCommit(Option<Map<String, String>> extraMetadata, HoodieWriteMetadata<O> result) {
-    this.txnManager.beginTransaction(Option.of(new HoodieInstant(State.INFLIGHT, HoodieTimeline.COMMIT_ACTION, instantTime)),
+    final Option<HoodieInstant> inflightInstant = Option.of(new HoodieInstant(State.INFLIGHT,
+        HoodieTimeline.COMMIT_ACTION, instantTime));
+    this.txnManager.beginTransaction(inflightInstant,
         lastCompletedTxn.isPresent() ? Option.of(lastCompletedTxn.get().getLeft()) : Option.empty());
     try {
       TransactionUtils.resolveWriteConflictIfAny(table, this.txnManager.getCurrentTransactionOwner(),
           result.getCommitMetadata(), config, this.txnManager.getLastCompletedTransactionOwner());
       commit(extraMetadata, result);
     } finally {
-      this.txnManager.endTransaction();
+      this.txnManager.endTransaction(inflightInstant);
     }
   }
 
@@ -159,10 +175,6 @@ public abstract class BaseCommitActionExecutor<T extends HoodieRecordPayload, I,
     } catch (HoodieIOException ioe) {
       throw new HoodieCommitException("Failed to complete commit " + instantTime + " due to finalize errors.", ioe);
     }
-  }
-
-  protected void syncTableMetadata() {
-    // No Op
   }
 
   /**

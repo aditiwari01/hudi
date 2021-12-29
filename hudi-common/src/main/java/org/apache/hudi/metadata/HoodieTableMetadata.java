@@ -23,13 +23,13 @@ import org.apache.hudi.common.config.SerializableConfiguration;
 import org.apache.hudi.common.engine.HoodieEngineContext;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.util.Option;
-
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Interface that supports querying various pieces of metadata about a hudi table.
@@ -43,11 +43,12 @@ public interface HoodieTableMetadata extends Serializable, AutoCloseable {
    * {@link org.apache.hudi.common.table.timeline.HoodieTimeline#INIT_INSTANT_TS}, such that the metadata table
    * can be prepped even before bootstrap is done.
    */
-  String SOLO_COMMIT_TIMESTAMP = "0000000000000";
+  String SOLO_COMMIT_TIMESTAMP = "00000000000000";
   // Key for the record which saves list of all partitions
   String RECORDKEY_PARTITION_LIST = "__all_partitions__";
   // The partition name used for non-partitioned tables
   String NON_PARTITIONED_NAME = ".";
+  String EMPTY_PARTITION_NAME = "";
 
   // Base path of the Metadata Table relative to the dataset (.hoodie/metadata)
   static final String METADATA_TABLE_REL_PATH = HoodieTableMetaClient.METAFOLDER_NAME + Path.SEPARATOR + "metadata";
@@ -67,6 +68,9 @@ public interface HoodieTableMetadata extends Serializable, AutoCloseable {
    * @param basePath The base path to check
    */
   static boolean isMetadataTable(String basePath) {
+    if (basePath.endsWith(Path.SEPARATOR)) {
+      basePath = basePath.substring(0, basePath.length() - 1);
+    }
     return basePath.endsWith(METADATA_TABLE_REL_PATH);
   }
 
@@ -77,7 +81,7 @@ public interface HoodieTableMetadata extends Serializable, AutoCloseable {
 
   static HoodieTableMetadata create(HoodieEngineContext engineContext, HoodieMetadataConfig metadataConfig, String datasetBasePath,
                                     String spillableMapPath, boolean reuse) {
-    if (metadataConfig.useFileListingMetadata()) {
+    if (metadataConfig.enabled()) {
       return new HoodieBackedTableMetadata(engineContext, metadataConfig, datasetBasePath, spillableMapPath, reuse);
     } else {
       return new FileSystemBackedTableMetadata(engineContext, new SerializableConfiguration(engineContext.getHadoopConf()),
@@ -96,9 +100,22 @@ public interface HoodieTableMetadata extends Serializable, AutoCloseable {
   List<String> getAllPartitionPaths() throws IOException;
 
   /**
+   * Fetch all files for given partition paths.
+   */
+  Map<String, FileStatus[]> getAllFilesInPartitions(List<String> partitionPaths) throws IOException;
+
+  /**
    * Get the instant time to which the metadata is synced w.r.t data timeline.
    */
   Option<String> getSyncedInstantTime();
 
-  boolean isInSync();
+  /**
+   * Returns the timestamp of the latest compaction.
+   */
+  Option<String> getLatestCompactionTime();
+
+  /**
+   * Clear the states of the table metadata.
+   */
+  void reset();
 }

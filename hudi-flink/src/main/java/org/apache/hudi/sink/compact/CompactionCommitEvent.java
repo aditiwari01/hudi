@@ -32,24 +32,69 @@ public class CompactionCommitEvent implements Serializable {
   /**
    * The compaction commit instant time.
    */
-  private final String instant;
+  private String instant;
+
+  /**
+   * The file ID.
+   */
+  private String fileId;
+
   /**
    * The write statuses.
    */
-  private final List<WriteStatus> writeStatuses;
+  private List<WriteStatus> writeStatuses;
   /**
    * The compaction task identifier.
    */
-  private final int taskID;
+  private int taskID;
 
-  public CompactionCommitEvent(String instant, List<WriteStatus> writeStatuses, int taskID) {
+  public CompactionCommitEvent() {
+  }
+
+  /**
+   * An event with NULL write statuses that represents a failed compaction.
+   */
+  public CompactionCommitEvent(String instant, String fileId, int taskID) {
+    this(instant, fileId, null, taskID);
+  }
+
+  public CompactionCommitEvent(String instant, String fileId, List<WriteStatus> writeStatuses, int taskID) {
     this.instant = instant;
+    this.fileId = fileId;
     this.writeStatuses = writeStatuses;
+    this.taskID = taskID;
+  }
+
+  public boolean isFailed() {
+    return this.writeStatuses == null;
+  }
+
+  // -------------------------------------------------------------------------
+  //  Getter/Setter
+  // -------------------------------------------------------------------------
+
+  public void setInstant(String instant) {
+    this.instant = instant;
+  }
+
+  public void setFileId(String fileId) {
+    this.fileId = fileId;
+  }
+
+  public void setWriteStatuses(List<WriteStatus> writeStatuses) {
+    this.writeStatuses = writeStatuses;
+  }
+
+  public void setTaskID(int taskID) {
     this.taskID = taskID;
   }
 
   public String getInstant() {
     return instant;
+  }
+
+  public String getFileId() {
+    return fileId;
   }
 
   public List<WriteStatus> getWriteStatuses() {

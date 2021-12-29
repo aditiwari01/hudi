@@ -73,6 +73,7 @@ public interface HoodieTimeline extends Serializable {
   String INFLIGHT_CLEAN_EXTENSION = "." + CLEAN_ACTION + INFLIGHT_EXTENSION;
   String REQUESTED_CLEAN_EXTENSION = "." + CLEAN_ACTION + REQUESTED_EXTENSION;
   String INFLIGHT_ROLLBACK_EXTENSION = "." + ROLLBACK_ACTION + INFLIGHT_EXTENSION;
+  String REQUESTED_ROLLBACK_EXTENSION = "." + ROLLBACK_ACTION + REQUESTED_EXTENSION;
   String INFLIGHT_SAVEPOINT_EXTENSION = "." + SAVEPOINT_ACTION + INFLIGHT_EXTENSION;
   String REQUESTED_COMPACTION_SUFFIX = StringUtils.join(COMPACTION_ACTION, REQUESTED_EXTENSION);
   String REQUESTED_COMPACTION_EXTENSION = StringUtils.join(".", REQUESTED_COMPACTION_SUFFIX);
@@ -131,6 +132,14 @@ public interface HoodieTimeline extends Serializable {
   HoodieTimeline filterCompletedAndCompactionInstants();
 
   /**
+   * Filter this timeline to include the completed and exclude operation type is delete partition instants.
+   *
+   * @return New instance of HoodieTimeline with include the completed and
+   * exclude operation type is delete partition instants
+   */
+  HoodieTimeline filterCompletedInstantsWithCommitMetadata();
+
+  /**
    * Timeline to just include commits (commit/deltacommit), compaction and replace actions.
    * 
    * @return
@@ -155,6 +164,11 @@ public interface HoodieTimeline extends Serializable {
    * Filter this timeline to just include requested and inflight replacecommit instants.
    */
   HoodieTimeline filterPendingReplaceTimeline();
+
+  /**
+   * Filter this timeline to include pending rollbacks.
+   */
+  HoodieTimeline filterPendingRollbackTimeline();
 
   /**
    * Create a new Timeline with all the instants after startTs.
@@ -207,6 +221,13 @@ public interface HoodieTimeline extends Serializable {
    * @return first completed instant if available
    */
   Option<HoodieInstant> firstInstant();
+
+  /**
+   * @param action Instant action String.
+   * @param state  Instant State.
+   * @return first instant of a specific action and state if available
+   */
+  Option<HoodieInstant> firstInstant(String action, State state);
 
   /**
    * @return nth completed instant from the first completed instant
@@ -269,6 +290,11 @@ public interface HoodieTimeline extends Serializable {
   Option<byte[]> getInstantDetails(HoodieInstant instant);
 
   /**
+   * Check WriteOperationType is DeletePartition.
+   */
+  boolean isDeletePartitionType(HoodieInstant instant);
+
+  /**
    * Helper methods to compare instants.
    **/
   BiPredicate<String, String> EQUALS = (commit1, commit2) -> commit1.compareTo(commit2) == 0;
@@ -321,6 +347,10 @@ public interface HoodieTimeline extends Serializable {
     return new HoodieInstant(State.INFLIGHT, REPLACE_COMMIT_ACTION, timestamp);
   }
 
+  static HoodieInstant getRollbackRequestedInstant(HoodieInstant instant) {
+    return instant.isRequested() ? instant : HoodieTimeline.getRequestedInstant(instant);
+  }
+
   /**
    * Returns the inflight instant corresponding to the instant being passed. Takes care of changes in action names
    * between inflight and completed instants (compaction <=> commit).
@@ -361,6 +391,10 @@ public interface HoodieTimeline extends Serializable {
 
   static String makeRollbackFileName(String instant) {
     return StringUtils.join(instant, HoodieTimeline.ROLLBACK_EXTENSION);
+  }
+
+  static String makeRequestedRollbackFileName(String instant) {
+    return StringUtils.join(instant, HoodieTimeline.REQUESTED_ROLLBACK_EXTENSION);
   }
 
   static String makeInflightRollbackFileName(String instant) {

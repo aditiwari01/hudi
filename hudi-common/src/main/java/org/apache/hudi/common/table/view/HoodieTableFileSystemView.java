@@ -317,7 +317,7 @@ public class HoodieTableFileSystemView extends IncrementalTimelineSyncFileSystem
 
   @Override
   protected void storePartitionView(String partitionPath, List<HoodieFileGroup> fileGroups) {
-    LOG.info("Adding file-groups for partition :" + partitionPath + ", #FileGroups=" + fileGroups.size());
+    LOG.debug("Adding file-groups for partition :" + partitionPath + ", #FileGroups=" + fileGroups.size());
     List<HoodieFileGroup> newList = new ArrayList<>(fileGroups);
     partitionToFileGroupsMap.put(partitionPath, newList);
   }
@@ -349,12 +349,12 @@ public class HoodieTableFileSystemView extends IncrementalTimelineSyncFileSystem
 
   @Override
   public void close() {
-    closed = true;
-    super.reset();
+    super.close();
     partitionToFileGroupsMap = null;
     fgIdToPendingCompaction = null;
     fgIdToBootstrapBaseFile = null;
     fgIdToReplaceInstants = null;
+    closed = true;
   }
 
   @Override

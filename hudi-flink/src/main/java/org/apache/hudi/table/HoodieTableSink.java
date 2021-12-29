@@ -19,30 +19,22 @@
 package org.apache.hudi.table;
 
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.model.WriteOperationType;
 import org.apache.hudi.configuration.FlinkOptions;
-import org.apache.hudi.sink.StreamWriteOperatorFactory;
-import org.apache.hudi.sink.compact.CompactFunction;
-import org.apache.hudi.sink.compact.CompactionCommitEvent;
-import org.apache.hudi.sink.compact.CompactionCommitSink;
-import org.apache.hudi.sink.compact.CompactionPlanEvent;
-import org.apache.hudi.sink.compact.CompactionPlanOperator;
-import org.apache.hudi.sink.partitioner.BucketAssignFunction;
-import org.apache.hudi.sink.transform.RowDataToHoodieFunction;
+import org.apache.hudi.configuration.OptionsResolver;
+import org.apache.hudi.sink.utils.Pipelines;
+import org.apache.hudi.util.ChangelogModes;
 import org.apache.hudi.util.StreamerUtil;
 
 import org.apache.flink.annotation.VisibleForTesting;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.DataStreamSink;
-import org.apache.flink.streaming.api.functions.sink.SinkFunction;
-import org.apache.flink.streaming.api.operators.KeyedProcessOperator;
-import org.apache.flink.table.api.TableSchema;
-import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.sinks.AppendStreamTableSink;
-import org.apache.flink.table.sinks.PartitionableTableSink;
-import org.apache.flink.table.sinks.TableSink;
-import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.catalog.ResolvedSchema;
+import org.apache.flink.table.connector.ChangelogMode;
+import org.apache.flink.table.connector.sink.DataStreamSinkProvider;
+import org.apache.flink.table.connector.sink.DynamicTableSink;
+import org.apache.flink.table.connector.sink.abilities.SupportsOverwrite;
+import org.apache.flink.table.connector.sink.abilities.SupportsPartitioning;
 import org.apache.flink.table.types.logical.RowType;
 
 import java.util.Map;
@@ -50,74 +42,61 @@ import java.util.Map;
 /**
  * Hoodie table sink.
  */
-public class HoodieTableSink implements AppendStreamTableSink<RowData>, PartitionableTableSink {
+public class HoodieTableSink implements DynamicTableSink, SupportsPartitioning, SupportsOverwrite {
 
   private final Configuration conf;
-  private final TableSchema schema;
+  private final ResolvedSchema schema;
+  private boolean overwrite = false;
 
-  public HoodieTableSink(Configuration conf, TableSchema schema) {
+  public HoodieTableSink(Configuration conf, ResolvedSchema schema) {
     this.conf = conf;
     this.schema = schema;
   }
 
-  @Override
-  public DataStreamSink<?> consumeDataStream(DataStream<RowData> dataStream) {
-    // Read from kafka source
-    RowType rowType = (RowType) this.schema.toRowDataType().notNull().getLogicalType();
-    int numWriteTasks = this.conf.getInteger(FlinkOptions.WRITE_TASKS);
-    StreamWriteOperatorFactory<HoodieRecord> operatorFactory = new StreamWriteOperatorFactory<>(conf);
-
-    DataStream<Object> pipeline = dataStream
-        .map(new RowDataToHoodieFunction<>(rowType, conf), TypeInformation.of(HoodieRecord.class))
-        // Key-by partition path, to avoid multiple subtasks write to a partition at the same time
-        .keyBy(HoodieRecord::getPartitionPath)
-        .transform(
-            "bucket_assigner",
-            TypeInformation.of(HoodieRecord.class),
-            new KeyedProcessOperator<>(new BucketAssignFunction<>(conf)))
-        .uid("uid_bucket_assigner")
-        // shuffle by fileId(bucket id)
-        .keyBy(record -> record.getCurrentLocation().getFileId())
-        .transform("hoodie_stream_write", TypeInformation.of(Object.class), operatorFactory)
-        .uid("uid_hoodie_stream_write")
-        .setParallelism(numWriteTasks);
-    if (StreamerUtil.needsScheduleCompaction(conf)) {
-      return pipeline.transform("compact_plan_generate",
-          TypeInformation.of(CompactionPlanEvent.class),
-          new CompactionPlanOperator(conf))
-          .uid("uid_compact_plan_generate")
-          .setParallelism(1) // plan generate must be singleton
-          .keyBy(event -> event.getOperation().hashCode())
-          .transform("compact_task",
-              TypeInformation.of(CompactionCommitEvent.class),
-              new KeyedProcessOperator<>(new CompactFunction(conf)))
-          .addSink(new CompactionCommitSink(conf))
-          .name("compact_commit")
-          .setParallelism(1); // compaction commit should be singleton
-    } else {
-      return pipeline.addSink(new DummySinkFunction<>())
-          .name("dummy").uid("uid_dummy");
-    }
+  public HoodieTableSink(Configuration conf, ResolvedSchema schema, boolean overwrite) {
+    this.conf = conf;
+    this.schema = schema;
+    this.overwrite = overwrite;
   }
 
   @Override
-  public TableSink<RowData> configure(String[] strings, TypeInformation<?>[] infos) {
-    return this;
-  }
+  public SinkRuntimeProvider getSinkRuntimeProvider(Context context) {
+    return (DataStreamSinkProvider) dataStream -> {
 
-  @Override
-  public TableSchema getTableSchema() {
-    return this.schema;
-  }
+      // setup configuration
+      long ckpTimeout = dataStream.getExecutionEnvironment()
+          .getCheckpointConfig().getCheckpointTimeout();
+      conf.setLong(FlinkOptions.WRITE_COMMIT_ACK_TIMEOUT, ckpTimeout);
 
-  @Override
-  public DataType getConsumedDataType() {
-    return this.schema.toRowDataType().bridgedTo(RowData.class);
-  }
+      RowType rowType = (RowType) schema.toSourceRowDataType().notNull().getLogicalType();
 
-  @Override
-  public void setStaticPartition(Map<String, String> partitions) {
-    // no operation
+      // bulk_insert mode
+      final String writeOperation = this.conf.get(FlinkOptions.OPERATION);
+      if (WriteOperationType.fromValue(writeOperation) == WriteOperationType.BULK_INSERT) {
+        return context.isBounded() ? Pipelines.bulkInsert(conf, rowType, dataStream) : Pipelines.append(conf, rowType, dataStream);
+      }
+
+      // Append mode
+      if (OptionsResolver.isAppendMode(conf)) {
+        return Pipelines.append(conf, rowType, dataStream);
+      }
+
+      // default parallelism
+      int parallelism = dataStream.getExecutionConfig().getParallelism();
+      DataStream<Object> pipeline;
+
+      // bootstrap
+      final DataStream<HoodieRecord> hoodieRecordDataStream =
+          Pipelines.bootstrap(conf, rowType, parallelism, dataStream, context.isBounded(), overwrite);
+      // write pipeline
+      pipeline = Pipelines.hoodieStreamWrite(conf, parallelism, hoodieRecordDataStream);
+      // compaction
+      if (StreamerUtil.needsAsyncCompaction(conf)) {
+        return Pipelines.compact(conf, pipeline);
+      } else {
+        return Pipelines.clean(conf, pipeline);
+      }
+    };
   }
 
   @VisibleForTesting
@@ -125,6 +104,38 @@ public class HoodieTableSink implements AppendStreamTableSink<RowData>, Partitio
     return this.conf;
   }
 
-  // Dummy sink function that does nothing.
-  private static class DummySinkFunction<T> implements SinkFunction<T> {}
+  @Override
+  public ChangelogMode getChangelogMode(ChangelogMode changelogMode) {
+    if (conf.getBoolean(FlinkOptions.CHANGELOG_ENABLED)) {
+      return ChangelogModes.FULL;
+    } else {
+      return ChangelogModes.UPSERT;
+    }
+  }
+
+  @Override
+  public DynamicTableSink copy() {
+    return new HoodieTableSink(this.conf, this.schema, this.overwrite);
+  }
+
+  @Override
+  public String asSummaryString() {
+    return "HoodieTableSink";
+  }
+
+  @Override
+  public void applyStaticPartition(Map<String, String> partitions) {
+    // #applyOverwrite should have been invoked.
+    if (this.overwrite && partitions.size() > 0) {
+      this.conf.setString(FlinkOptions.OPERATION, WriteOperationType.INSERT_OVERWRITE.value());
+    }
+  }
+
+  @Override
+  public void applyOverwrite(boolean overwrite) {
+    this.overwrite = overwrite;
+    // set up the operation as INSERT_OVERWRITE_TABLE first,
+    // if there are explicit partitions, #applyStaticPartition would overwrite the option.
+    this.conf.setString(FlinkOptions.OPERATION, WriteOperationType.INSERT_OVERWRITE_TABLE.value());
+  }
 }

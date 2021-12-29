@@ -39,8 +39,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.apache.flink.formats.avro.typeutils.AvroSchemaConverter.extractValueTypeToAvroMap;
-
 /**
  * Tool class used to convert from {@link RowData} to Avro {@link GenericRecord}.
  *
@@ -70,7 +68,7 @@ public class RowDataToAvroConverters {
   // --------------------------------------------------------------------------------
 
   /**
-   * Creates a runtime converter accroding to the given logical type that converts objects of
+   * Creates a runtime converter according to the given logical type that converts objects of
    * Flink Table & SQL internal data structures to corresponding Avro data structures.
    */
   public static RowDataToAvroConverter createConverter(LogicalType type) {
@@ -279,7 +277,7 @@ public class RowDataToAvroConverters {
   }
 
   private static RowDataToAvroConverter createMapConverter(LogicalType type) {
-    LogicalType valueType = extractValueTypeToAvroMap(type);
+    LogicalType valueType = AvroSchemaConverter.extractValueTypeToAvroMap(type);
     final ArrayData.ElementGetter valueGetter = ArrayData.createElementGetter(valueType);
     final RowDataToAvroConverter valueConverter = createConverter(valueType);
 

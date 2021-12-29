@@ -20,8 +20,6 @@ package org.apache.hudi.sink.utils;
 import org.apache.flink.api.common.state.AggregatingState;
 import org.apache.flink.api.common.state.AggregatingStateDescriptor;
 import org.apache.flink.api.common.state.BroadcastState;
-import org.apache.flink.api.common.state.FoldingState;
-import org.apache.flink.api.common.state.FoldingStateDescriptor;
 import org.apache.flink.api.common.state.KeyedStateStore;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
@@ -51,6 +49,7 @@ public class MockOperatorStateStore implements KeyedStateStore, OperatorStateSto
   private Map<String, TestUtils.MockListState> lastSuccessStateMap;
 
   private MapState mapState;
+  private Map<String, ValueState> valueStateMap;
 
   public MockOperatorStateStore() {
     this.historyStateMap = new HashMap<>();
@@ -59,6 +58,7 @@ public class MockOperatorStateStore implements KeyedStateStore, OperatorStateSto
     this.lastSuccessStateMap = new HashMap<>();
 
     this.mapState = new MockMapState<>();
+    this.valueStateMap = new HashMap<>();
   }
 
   @Override
@@ -68,7 +68,9 @@ public class MockOperatorStateStore implements KeyedStateStore, OperatorStateSto
 
   @Override
   public <T> ValueState<T> getState(ValueStateDescriptor<T> valueStateDescriptor) {
-    return null;
+    String name = valueStateDescriptor.getName();
+    valueStateMap.putIfAbsent(name, new MockValueState());
+    return valueStateMap.get(name);
   }
 
   @Override
@@ -86,11 +88,6 @@ public class MockOperatorStateStore implements KeyedStateStore, OperatorStateSto
 
   @Override
   public <I, A, O> AggregatingState<I, O> getAggregatingState(AggregatingStateDescriptor<I, A, O> aggregatingStateDescriptor) {
-    return null;
-  }
-
-  @Override
-  public <T, A> FoldingState<T, A> getFoldingState(FoldingStateDescriptor<T, A> foldingStateDescriptor) {
     return null;
   }
 

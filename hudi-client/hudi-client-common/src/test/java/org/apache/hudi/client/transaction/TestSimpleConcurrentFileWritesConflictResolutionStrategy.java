@@ -314,7 +314,7 @@ public class TestSimpleConcurrentFileWritesConflictResolutionStrategy extends Ho
     commitMetadata.addWriteStat(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, writeStat);
     commitMetadata.setOperationType(WriteOperationType.INSERT);
     HoodieTestTable.of(metaClient)
-        .addCommit(instantTime, commitMetadata)
+        .addCommit(instantTime, Option.of(commitMetadata))
         .withBaseFilesInPartition(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, fileId1, fileId2);
   }
 
@@ -362,7 +362,7 @@ public class TestSimpleConcurrentFileWritesConflictResolutionStrategy extends Ho
     writeStat.setFileId("file-1");
     commitMetadata.addWriteStat(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, writeStat);
     HoodieTestTable.of(metaClient)
-        .addCommit(instantTime, commitMetadata)
+        .addCommit(instantTime, Option.of(commitMetadata))
         .withBaseFilesInPartition(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, fileId1, fileId2);
   }
 
@@ -383,7 +383,7 @@ public class TestSimpleConcurrentFileWritesConflictResolutionStrategy extends Ho
     requestedReplaceMetadata.setClusteringPlan(clusteringPlan);
     requestedReplaceMetadata.setVersion(TimelineLayoutVersion.CURR_VERSION);
     HoodieTestTable.of(metaClient)
-        .addRequestedReplace(instantTime, requestedReplaceMetadata)
+        .addRequestedReplace(instantTime, Option.of(requestedReplaceMetadata))
         .withBaseFilesInPartition(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, fileId1, fileId2);
   }
 
@@ -413,7 +413,7 @@ public class TestSimpleConcurrentFileWritesConflictResolutionStrategy extends Ho
     requestedReplaceMetadata.setClusteringPlan(clusteringPlan);
     requestedReplaceMetadata.setVersion(TimelineLayoutVersion.CURR_VERSION);
     HoodieTestTable.of(metaClient)
-        .addReplaceCommit(instantTime, requestedReplaceMetadata, replaceMetadata)
+        .addReplaceCommit(instantTime, Option.of(requestedReplaceMetadata), Option.empty(), replaceMetadata)
         .withBaseFilesInPartition(HoodieTestDataGenerator.DEFAULT_FIRST_PARTITION_PATH, fileId1, fileId2);
   }
 

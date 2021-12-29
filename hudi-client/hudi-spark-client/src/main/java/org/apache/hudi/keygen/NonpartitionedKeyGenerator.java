@@ -20,20 +20,34 @@ package org.apache.hudi.keygen;
 
 import org.apache.avro.generic.GenericRecord;
 import org.apache.hudi.common.config.TypedProperties;
+import org.apache.hudi.keygen.constant.KeyGeneratorOptions;
 import org.apache.spark.sql.Row;
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.types.StructType;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * Simple Key generator for unpartitioned Hive Tables.
  */
-public class NonpartitionedKeyGenerator extends SimpleKeyGenerator {
+public class NonpartitionedKeyGenerator extends BuiltinKeyGenerator {
 
   private final NonpartitionedAvroKeyGenerator nonpartitionedAvroKeyGenerator;
 
-  public NonpartitionedKeyGenerator(TypedProperties config) {
-    super(config);
-    nonpartitionedAvroKeyGenerator = new NonpartitionedAvroKeyGenerator(config);
+  public NonpartitionedKeyGenerator(TypedProperties props) {
+    super(props);
+    this.recordKeyFields = Arrays.stream(props.getString(KeyGeneratorOptions.RECORDKEY_FIELD_NAME.key())
+        .split(",")).map(String::trim).collect(Collectors.toList());
+    this.partitionPathFields = Collections.emptyList();
+    nonpartitionedAvroKeyGenerator = new NonpartitionedAvroKeyGenerator(props);
+  }
+
+  @Override
+  public String getRecordKey(GenericRecord record) {
+    return nonpartitionedAvroKeyGenerator.getRecordKey(record);
   }
 
   @Override
@@ -51,5 +65,9 @@ public class NonpartitionedKeyGenerator extends SimpleKeyGenerator {
     return nonpartitionedAvroKeyGenerator.getEmptyPartition();
   }
 
+  @Override
+  public String getPartitionPath(InternalRow internalRow, StructType structType) {
+    return nonpartitionedAvroKeyGenerator.getEmptyPartition();
+  }
 }
 

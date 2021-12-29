@@ -31,6 +31,7 @@ import org.apache.hudi.client.bootstrap.selector.BootstrapModeSelector;
 import org.apache.hudi.client.bootstrap.translator.BootstrapPartitionPathTranslator;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
 import org.apache.hudi.client.utils.SparkMemoryUtils;
+import org.apache.hudi.client.utils.SparkValidatorUtils;
 import org.apache.hudi.common.bootstrap.FileStatusUtils;
 import org.apache.hudi.common.bootstrap.index.BootstrapIndex;
 import org.apache.hudi.common.config.TypedProperties;
@@ -54,15 +55,15 @@ import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.common.util.queue.BoundedInMemoryExecutor;
 import org.apache.hudi.config.HoodieWriteConfig;
+import org.apache.hudi.data.HoodieJavaRDD;
 import org.apache.hudi.exception.HoodieCommitException;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.HoodieIOException;
-import org.apache.hudi.exception.HoodieMetadataException;
+import org.apache.hudi.exception.HoodieKeyGeneratorException;
 import org.apache.hudi.execution.SparkBoundedInMemoryExecutor;
 import org.apache.hudi.io.HoodieBootstrapHandle;
 import org.apache.hudi.keygen.KeyGeneratorInterface;
-import org.apache.hudi.metadata.HoodieTableMetadataWriter;
-import org.apache.hudi.metadata.SparkHoodieBackedTableMetadataWriter;
+import org.apache.hudi.keygen.factory.HoodieSparkKeyGeneratorFactory;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.HoodieTable;
 import org.apache.hudi.table.action.HoodieWriteMetadata;
@@ -76,6 +77,7 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hudi.table.marker.WriteMarkersFactory;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
 import org.apache.parquet.avro.AvroParquetReader;
@@ -98,6 +100,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+
+import static org.apache.hudi.table.action.bootstrap.MetadataBootstrapHandlerFactory.getMetadataHandler;
 
 public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>>
     extends BaseCommitActionExecutor<T, JavaRDD<HoodieRecord<T>>, JavaRDD<HoodieKey>, JavaRDD<WriteStatus>, HoodieBootstrapWriteMetadata> {
@@ -123,8 +127,6 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
         "Ensure Bootstrap Source Path is set");
     ValidationUtils.checkArgument(config.getBootstrapModeSelectorClass() != null,
         "Ensure Bootstrap Partition Selector is set");
-    ValidationUtils.checkArgument(config.getBootstrapKeyGeneratorClass() != null,
-        "Ensure bootstrap key generator class is set");
   }
 
   @Override
@@ -143,6 +145,9 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
       Option<HoodieWriteMetadata> metadataResult = metadataBootstrap(partitionSelections.get(BootstrapMode.METADATA_ONLY));
       // if there are full bootstrap to be performed, perform that too
       Option<HoodieWriteMetadata> fullBootstrapResult = fullBootstrap(partitionSelections.get(BootstrapMode.FULL_RECORD));
+      // Delete the marker directory for the instant
+      WriteMarkersFactory.get(config.getMarkersType(), table, instantTime)
+          .quietDeleteMarkerDir(context, config.getMarkersDeleteParallelism());
       return new HoodieBootstrapWriteMetadata(metadataResult, fullBootstrapResult);
     } catch (IOException ioe) {
       throw new HoodieIOException(ioe.getMessage(), ioe);
@@ -184,8 +189,8 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
     writeStatusRDD = writeStatusRDD.persist(SparkMemoryUtils.getWriteStatusStorageLevel(config.getProps()));
     Instant indexStartTime = Instant.now();
     // Update the index back
-    JavaRDD<WriteStatus> statuses = table.getIndex().updateLocation(writeStatusRDD, context,
-        table);
+    JavaRDD<WriteStatus> statuses = HoodieJavaRDD.getJavaRDD(
+        table.getIndex().updateLocation(HoodieJavaRDD.of(writeStatusRDD), context, table));
     result.setIndexUpdateDuration(Duration.between(indexStartTime, Instant.now()));
     result.setWriteStatuses(statuses);
     commitOnAutoCommit(result);
@@ -225,17 +230,6 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
     LOG.info("Committing metadata bootstrap !!");
   }
 
-  @Override
-  protected void syncTableMetadata() {
-    // Open up the metadata table again, for syncing
-    try (HoodieTableMetadataWriter writer =
-             SparkHoodieBackedTableMetadataWriter.create(hadoopConf, config, context)) {
-      LOG.info("Successfully synced to metadata table");
-    } catch (Exception e) {
-      throw new HoodieMetadataException("Error syncing to metadata table.", e);
-    }
-  }
-
   protected void commit(Option<Map<String, String>> extraMetadata, HoodieWriteMetadata<JavaRDD<WriteStatus>> result, List<HoodieWriteStat> stats) {
     String actionType = table.getMetaClient().getCommitActionType();
     LOG.info("Committing " + instantTime + ", action Type " + actionType);
@@ -251,13 +245,14 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
 
     // Finalize write
     finalizeWrite(instantTime, stats, result);
-    syncTableMetadata();
     // add in extra metadata
     if (extraMetadata.isPresent()) {
       extraMetadata.get().forEach(metadata::addMetadata);
     }
     metadata.addMetadata(HoodieCommitMetadata.SCHEMA_KEY, getSchemaToStoreInCommit());
     metadata.setOperationType(operationType);
+
+    writeTableMetadata(metadata, actionType);
 
     try {
       activeTimeline.saveAsComplete(new HoodieInstant(true, actionType, instantTime),
@@ -390,8 +385,14 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
 
     TypedProperties properties = new TypedProperties();
     properties.putAll(config.getProps());
-    KeyGeneratorInterface keyGenerator  = (KeyGeneratorInterface) ReflectionUtils.loadClass(config.getBootstrapKeyGeneratorClass(),
-        properties);
+
+    KeyGeneratorInterface keyGenerator;
+    try {
+      keyGenerator = HoodieSparkKeyGeneratorFactory.createKeyGenerator(properties);
+    } catch (IOException e) {
+      throw new HoodieKeyGeneratorException("Init keyGenerator failed ", e);
+    }
+
     BootstrapPartitionPathTranslator translator = (BootstrapPartitionPathTranslator) ReflectionUtils.loadClass(
         config.getBootstrapPartitionPathTranslatorClass(), properties);
 
@@ -403,8 +404,8 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
         .collect(Collectors.toList());
 
     return jsc.parallelize(bootstrapPaths, config.getBootstrapParallelism())
-        .map(partitionFsPair -> handleMetadataBootstrap(partitionFsPair.getLeft(), partitionFsPair.getRight().getLeft(),
-            partitionFsPair.getRight().getRight(), keyGenerator));
+        .map(partitionFsPair -> getMetadataHandler(config, table, partitionFsPair.getRight().getRight()).runMetadataBootstrap(partitionFsPair.getLeft(),
+                partitionFsPair.getRight().getLeft(), keyGenerator));
   }
 
   @Override
@@ -415,5 +416,10 @@ public class SparkBootstrapCommitActionExecutor<T extends HoodieRecordPayload<T>
   @Override
   protected Iterator<List<WriteStatus>> handleUpdate(String partitionPath, String fileId, Iterator<HoodieRecord<T>> recordItr) {
     throw new UnsupportedOperationException("Should not called in bootstrap code path");
+  }
+
+  @Override
+  protected void runPrecommitValidators(HoodieWriteMetadata<JavaRDD<WriteStatus>> writeMetadata) {
+    SparkValidatorUtils.runValidators(config, writeMetadata, context, table, instantTime);
   }
 }

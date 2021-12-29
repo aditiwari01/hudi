@@ -26,11 +26,12 @@ import org.apache.hudi.common.model.HoodieKey;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieTableType;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
+import org.apache.hudi.common.table.view.FileSystemViewStorageConfig;
 import org.apache.hudi.common.testutils.HoodieTestUtils;
 import org.apache.hudi.common.testutils.RawTripTestPayload;
 import org.apache.hudi.common.testutils.Transformations;
+import org.apache.hudi.common.util.BaseFileUtils;
 import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.ParquetUtils;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieStorageConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
@@ -112,7 +113,9 @@ public class TestCopyOnWriteActionExecutor extends HoodieClientTestBase {
 
   private HoodieWriteConfig.Builder makeHoodieClientConfigBuilder() {
     // Prepare the AvroParquetIO
-    return HoodieWriteConfig.newBuilder().withPath(basePath).withSchema(SCHEMA.toString());
+    return HoodieWriteConfig.newBuilder().withPath(basePath).withSchema(SCHEMA.toString())
+        .withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder()
+            .withRemoteServerPort(timelineServicePort).build());
   }
 
   // TODO (weiy): Add testcases for crossing file writing.
@@ -154,14 +157,14 @@ public class TestCopyOnWriteActionExecutor extends HoodieClientTestBase {
     assertEquals(1, allFiles.length);
 
     // Read out the bloom filter and make sure filter can answer record exist or not
-    Path parquetFilePath = allFiles[0].getPath();
-    BloomFilter filter = ParquetUtils.readBloomFilterFromParquetMetadata(hadoopConf, parquetFilePath);
+    Path filePath = allFiles[0].getPath();
+    BloomFilter filter = BaseFileUtils.getInstance(table.getBaseFileFormat()).readBloomFilterFromMetadata(hadoopConf, filePath);
     for (HoodieRecord record : records) {
       assertTrue(filter.mightContain(record.getRecordKey()));
     }
 
-    // Read the parquet file, check the record content
-    List<GenericRecord> fileRecords = ParquetUtils.readAvroRecords(hadoopConf, parquetFilePath);
+    // Read the base file, check the record content
+    List<GenericRecord> fileRecords = BaseFileUtils.getInstance(table.getBaseFileFormat()).readAvroRecords(hadoopConf, filePath);
     GenericRecord newRecord;
     int index = 0;
     for (GenericRecord record : fileRecords) {
@@ -192,12 +195,12 @@ public class TestCopyOnWriteActionExecutor extends HoodieClientTestBase {
     allFiles = getIncrementalFiles(partitionPath, firstCommitTime, -1);
     assertEquals(1, allFiles.length);
     // verify new incremental file group is same as the previous one
-    assertEquals(FSUtils.getFileId(parquetFilePath.getName()), FSUtils.getFileId(allFiles[0].getPath().getName()));
+    assertEquals(FSUtils.getFileId(filePath.getName()), FSUtils.getFileId(allFiles[0].getPath().getName()));
 
     // Check whether the record has been updated
-    Path updatedParquetFilePath = allFiles[0].getPath();
+    Path updatedFilePath = allFiles[0].getPath();
     BloomFilter updatedFilter =
-        ParquetUtils.readBloomFilterFromParquetMetadata(hadoopConf, updatedParquetFilePath);
+        BaseFileUtils.getInstance(metaClient).readBloomFilterFromMetadata(hadoopConf, updatedFilePath);
     for (HoodieRecord record : records) {
       // No change to the _row_key
       assertTrue(updatedFilter.mightContain(record.getRecordKey()));
@@ -206,7 +209,7 @@ public class TestCopyOnWriteActionExecutor extends HoodieClientTestBase {
     assertTrue(updatedFilter.mightContain(insertedRecord1.getRecordKey()));
     records.add(insertedRecord1);// add this so it can further check below
 
-    ParquetReader updatedReader = ParquetReader.builder(new AvroReadSupport<>(), updatedParquetFilePath).build();
+    ParquetReader updatedReader = ParquetReader.builder(new AvroReadSupport<>(), updatedFilePath).build();
     index = 0;
     while ((newRecord = (GenericRecord) updatedReader.read()) != null) {
       assertEquals(newRecord.get("_row_key").toString(), records.get(index).getRecordKey());
@@ -393,7 +396,7 @@ public class TestCopyOnWriteActionExecutor extends HoodieClientTestBase {
     // Check the updated file
     int counts = 0;
     for (File file : Paths.get(basePath, "2016/01/31").toFile().listFiles()) {
-      if (file.getName().endsWith(".parquet") && FSUtils.getCommitTime(file.getName()).equals(instantTime)) {
+      if (file.getName().endsWith(table.getBaseFileExtension()) && FSUtils.getCommitTime(file.getName()).equals(instantTime)) {
         LOG.info(file.getName() + "-" + file.length());
         counts++;
       }
@@ -405,8 +408,10 @@ public class TestCopyOnWriteActionExecutor extends HoodieClientTestBase {
   public void testInsertUpsertWithHoodieAvroPayload() throws Exception {
     Schema schema = getSchemaFromResource(TestCopyOnWriteActionExecutor.class, "/testDataGeneratorSchema.txt");
     HoodieWriteConfig config = HoodieWriteConfig.newBuilder().withPath(basePath).withSchema(schema.toString())
-            .withStorageConfig(HoodieStorageConfig.newBuilder()
-                .parquetMaxFileSize(1000 * 1024).hfileMaxFileSize(1000 * 1024).build()).build();
+        .withFileSystemViewConfig(FileSystemViewStorageConfig.newBuilder()
+            .withRemoteServerPort(timelineServicePort).build())
+        .withStorageConfig(HoodieStorageConfig.newBuilder()
+            .parquetMaxFileSize(1000 * 1024).hfileMaxFileSize(1000 * 1024).build()).build();
     metaClient = HoodieTableMetaClient.reload(metaClient);
     HoodieSparkCopyOnWriteTable table = (HoodieSparkCopyOnWriteTable) HoodieSparkTable.create(config, context, metaClient);
     String instantTime = "000";

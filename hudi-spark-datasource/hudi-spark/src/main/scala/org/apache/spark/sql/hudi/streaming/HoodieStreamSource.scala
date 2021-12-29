@@ -22,16 +22,17 @@ import java.nio.charset.StandardCharsets
 import java.util.Date
 
 import org.apache.hadoop.fs.Path
-import org.apache.hudi.{DataSourceReadOptions, HoodieSparkUtils, IncrementalRelation, MergeOnReadIncrementalRelation}
+
+import org.apache.hudi.{AvroConversionUtils, DataSourceReadOptions, IncrementalRelation, MergeOnReadIncrementalRelation, SparkAdapterSupport}
 import org.apache.hudi.common.model.HoodieTableType
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline
 import org.apache.hudi.common.table.{HoodieTableMetaClient, TableSchemaResolver}
 import org.apache.hudi.common.util.{FileIOUtils, TablePathUtils}
+
 import org.apache.spark.sql.hudi.streaming.HoodieStreamSource.VERSION
 import org.apache.spark.sql.hudi.streaming.HoodieSourceOffset.INIT_OFFSET
 import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.avro.SchemaConverters
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.RowEncoder
 import org.apache.spark.sql.execution.streaming.{HDFSMetadataLog, Offset, Source}
@@ -51,7 +52,7 @@ class HoodieStreamSource(
     metadataPath: String,
     schemaOption: Option[StructType],
     parameters: Map[String, String])
-  extends Source with Logging with Serializable {
+  extends Source with Logging with Serializable with SparkAdapterSupport {
 
   @transient private val hadoopConf = sqlContext.sparkSession.sessionState.newHadoopConf()
   private lazy val tablePath: Path = {
@@ -118,8 +119,7 @@ class HoodieStreamSource(
   override def schema: StructType = {
     schemaOption.getOrElse {
       val schemaUtil = new TableSchemaResolver(metaClient)
-      SchemaConverters.toSqlType(schemaUtil.getTableAvroSchema)
-        .dataType.asInstanceOf[StructType]
+      AvroConversionUtils.convertAvroSchemaToStructType(schemaUtil.getTableAvroSchema)
     }
   }
 
@@ -154,13 +154,13 @@ class HoodieStreamSource(
     } else {
       // Consume the data between (startCommitTime, endCommitTime]
       val incParams = parameters ++ Map(
-        DataSourceReadOptions.BEGIN_INSTANTTIME_OPT_KEY -> startCommitTime(startOffset),
-        DataSourceReadOptions.END_INSTANTTIME_OPT_KEY -> endOffset.commitTime
+        DataSourceReadOptions.BEGIN_INSTANTTIME.key -> startCommitTime(startOffset),
+        DataSourceReadOptions.END_INSTANTTIME.key -> endOffset.commitTime
       )
 
       val rdd = tableType match {
         case HoodieTableType.COPY_ON_WRITE =>
-          val serDe = HoodieSparkUtils.createRowSerDe(RowEncoder(schema))
+          val serDe = sparkAdapter.createSparkRowSerDe(RowEncoder(schema))
           new IncrementalRelation(sqlContext, incParams, schema, metaClient)
             .buildScan()
             .map(serDe.serializeRow)
@@ -179,10 +179,10 @@ class HoodieStreamSource(
     startOffset match {
       case INIT_OFFSET => startOffset.commitTime
       case HoodieSourceOffset(commitTime) =>
-        val time = HoodieActiveTimeline.COMMIT_FORMATTER.parse(commitTime).getTime
+        val time = HoodieActiveTimeline.parseDateFromInstantTime(commitTime).getTime
         // As we consume the data between (start, end], start is not included,
         // so we +1s to the start commit time here.
-        HoodieActiveTimeline.COMMIT_FORMATTER.format(new Date(time + 1000))
+        HoodieActiveTimeline.formatDate(new Date(time + 1000))
       case _=> throw new IllegalStateException("UnKnow offset type.")
     }
   }

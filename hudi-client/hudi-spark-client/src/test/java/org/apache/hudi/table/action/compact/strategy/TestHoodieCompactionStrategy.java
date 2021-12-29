@@ -24,9 +24,11 @@ import org.apache.hudi.common.model.FileSlice;
 import org.apache.hudi.common.model.HoodieBaseFile;
 import org.apache.hudi.common.model.HoodieFileGroupId;
 import org.apache.hudi.common.model.HoodieLogFile;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieCompactionConfig;
 import org.apache.hudi.config.HoodieWriteConfig;
+
 import org.junit.jupiter.api.Test;
 
 import java.text.SimpleDateFormat;
@@ -97,19 +99,20 @@ public class TestHoodieCompactionStrategy {
     sizesMap.put(90 * MB, Collections.singletonList(1024 * MB));
     LogFileSizeBasedCompactionStrategy strategy = new LogFileSizeBasedCompactionStrategy();
     HoodieWriteConfig writeConfig = HoodieWriteConfig.newBuilder().withPath("/tmp").withCompactionConfig(
-        HoodieCompactionConfig.newBuilder().withCompactionStrategy(strategy).withTargetIOPerCompactionInMB(400).build())
+        HoodieCompactionConfig.newBuilder().withCompactionStrategy(strategy).withTargetIOPerCompactionInMB(1205)
+            .withLogFileSizeThresholdBasedCompaction(100 * 1024 * 1024).build())
         .build();
     List<HoodieCompactionOperation> operations = createCompactionOperations(writeConfig, sizesMap);
     List<HoodieCompactionOperation> returned = strategy.orderAndFilter(writeConfig, operations, new ArrayList<>());
 
     assertTrue(returned.size() < operations.size(),
         "LogFileSizeBasedCompactionStrategy should have resulted in fewer compactions");
-    assertEquals(1, returned.size(), "LogFileSizeBasedCompactionStrategy should have resulted in 1 compaction");
+    assertEquals(2, returned.size(), "LogFileSizeBasedCompactionStrategy should have resulted in 2 compaction");
     // Total size of all the log files
     Long returnedSize = returned.stream().map(s -> s.getMetrics().get(BoundedIOCompactionStrategy.TOTAL_IO_MB))
         .map(Double::longValue).reduce(Long::sum).orElse(0L);
-    assertEquals(1204, (long) returnedSize,
-        "Should chose the first 2 compactions which should result in a total IO of 690 MB");
+    assertEquals(1594, (long) returnedSize,
+        "Should chose the first 2 compactions which should result in a total IO of 1594 MB");
   }
 
   @Test
@@ -274,7 +277,7 @@ public class TestHoodieCompactionStrategy {
     private final long size;
 
     public TestHoodieBaseFile(long size) {
-      super("/tmp/XYXYXYXYXYYX_11_20180918020003.parquet");
+      super("/tmp/XYXYXYXYXYYX_11_20180918020003" + HoodieTableConfig.BASE_FILE_FORMAT.defaultValue().getFileExtension());
       this.size = size;
     }
 

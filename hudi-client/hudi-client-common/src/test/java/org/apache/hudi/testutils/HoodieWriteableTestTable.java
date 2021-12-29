@@ -23,17 +23,23 @@ import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.avro.HoodieAvroWriteSupport;
 import org.apache.hudi.common.bloom.BloomFilter;
 import org.apache.hudi.common.engine.TaskContextSupplier;
+import org.apache.hudi.common.model.HoodieFileFormat;
 import org.apache.hudi.common.model.HoodieLogFile;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.model.HoodieRecordLocation;
+import org.apache.hudi.common.table.HoodieTableConfig;
 import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.log.HoodieLogFormat;
 import org.apache.hudi.common.table.log.block.HoodieAvroDataBlock;
 import org.apache.hudi.common.table.log.block.HoodieLogBlock;
 import org.apache.hudi.common.testutils.FileCreateUtils;
-import org.apache.hudi.common.testutils.HoodieTestTable;
+import org.apache.hudi.common.testutils.HoodieMetadataTestTable;
+import org.apache.hudi.common.util.Option;
+import org.apache.hudi.common.util.collection.Pair;
 import org.apache.hudi.config.HoodieStorageConfig;
 import org.apache.hudi.io.storage.HoodieAvroParquetConfig;
+import org.apache.hudi.io.storage.HoodieOrcConfig;
+import org.apache.hudi.io.storage.HoodieOrcWriter;
 import org.apache.hudi.io.storage.HoodieParquetWriter;
 
 import org.apache.avro.Schema;
@@ -42,15 +48,17 @@ import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hudi.metadata.HoodieTableMetadataWriter;
 import org.apache.log4j.LogManager;
 import org.apache.log4j.Logger;
+import org.apache.orc.CompressionKind;
 import org.apache.parquet.avro.AvroSchemaConverter;
 import org.apache.parquet.hadoop.ParquetWriter;
 import org.apache.parquet.hadoop.metadata.CompressionCodecName;
 
 import java.io.IOException;
 import java.nio.file.Paths;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,16 +66,24 @@ import java.util.stream.Collectors;
 
 import static org.apache.hudi.common.testutils.FileCreateUtils.baseFileName;
 
-public class HoodieWriteableTestTable extends HoodieTestTable {
+public class HoodieWriteableTestTable extends HoodieMetadataTestTable {
   private static final Logger LOG = LogManager.getLogger(HoodieWriteableTestTable.class);
 
   protected final Schema schema;
   protected final BloomFilter filter;
+  protected final boolean populateMetaFields;
 
-  protected HoodieWriteableTestTable(String basePath, FileSystem fs, HoodieTableMetaClient metaClient, Schema schema, BloomFilter filter) {
-    super(basePath, fs, metaClient);
+  protected HoodieWriteableTestTable(String basePath, FileSystem fs, HoodieTableMetaClient metaClient,
+                                     Schema schema, BloomFilter filter) {
+    this(basePath, fs, metaClient, schema, filter, null);
+  }
+
+  protected HoodieWriteableTestTable(String basePath, FileSystem fs, HoodieTableMetaClient metaClient, Schema schema,
+                                     BloomFilter filter, HoodieTableMetadataWriter metadataWriter) {
+    super(basePath, fs, metaClient, metadataWriter);
     this.schema = schema;
     this.filter = filter;
+    this.populateMetaFields = metaClient.getTableConfig().populateMetaFields();
   }
 
   @Override
@@ -84,41 +100,71 @@ public class HoodieWriteableTestTable extends HoodieTestTable {
     FileCreateUtils.createPartitionMetaFile(basePath, partition);
     String fileName = baseFileName(currentInstantTime, fileId);
 
-    HoodieAvroWriteSupport writeSupport = new HoodieAvroWriteSupport(
-        new AvroSchemaConverter().convert(schema), schema, filter);
-    HoodieAvroParquetConfig config = new HoodieAvroParquetConfig(writeSupport, CompressionCodecName.GZIP,
-        ParquetWriter.DEFAULT_BLOCK_SIZE, ParquetWriter.DEFAULT_PAGE_SIZE, 120 * 1024 * 1024,
-        new Configuration(), Double.parseDouble(HoodieStorageConfig.DEFAULT_STREAM_COMPRESSION_RATIO));
-    try (HoodieParquetWriter writer = new HoodieParquetWriter(
-        currentInstantTime,
-        new Path(Paths.get(basePath, partition, fileName).toString()),
-        config, schema, contextSupplier)) {
-      int seqId = 1;
-      for (HoodieRecord record : records) {
-        GenericRecord avroRecord = (GenericRecord) record.getData().getInsertValue(schema).get();
-        HoodieAvroUtils.addCommitMetadataToRecord(avroRecord, currentInstantTime, String.valueOf(seqId++));
-        HoodieAvroUtils.addHoodieKeyToRecord(avroRecord, record.getRecordKey(), record.getPartitionPath(), fileName);
-        writer.writeAvro(record.getRecordKey(), avroRecord);
-        filter.add(record.getRecordKey());
+    Path baseFilePath = new Path(Paths.get(basePath, partition, fileName).toString());
+    if (this.fs.exists(baseFilePath)) {
+      LOG.warn("Deleting the existing base file " + baseFilePath);
+      this.fs.delete(baseFilePath, true);
+    }
+
+    if (HoodieTableConfig.BASE_FILE_FORMAT.defaultValue().equals(HoodieFileFormat.PARQUET)) {
+      HoodieAvroWriteSupport writeSupport = new HoodieAvroWriteSupport(
+          new AvroSchemaConverter().convert(schema), schema, Option.of(filter));
+      HoodieAvroParquetConfig config = new HoodieAvroParquetConfig(writeSupport, CompressionCodecName.GZIP,
+          ParquetWriter.DEFAULT_BLOCK_SIZE, ParquetWriter.DEFAULT_PAGE_SIZE, 120 * 1024 * 1024,
+          new Configuration(), Double.parseDouble(HoodieStorageConfig.PARQUET_COMPRESSION_RATIO_FRACTION.defaultValue()));
+      try (HoodieParquetWriter writer = new HoodieParquetWriter(
+          currentInstantTime,
+          new Path(Paths.get(basePath, partition, fileName).toString()),
+          config, schema, contextSupplier, populateMetaFields)) {
+        int seqId = 1;
+        for (HoodieRecord record : records) {
+          GenericRecord avroRecord = (GenericRecord) record.getData().getInsertValue(schema).get();
+          if (populateMetaFields) {
+            HoodieAvroUtils.addCommitMetadataToRecord(avroRecord, currentInstantTime, String.valueOf(seqId++));
+            HoodieAvroUtils.addHoodieKeyToRecord(avroRecord, record.getRecordKey(), record.getPartitionPath(), fileName);
+            writer.writeAvro(record.getRecordKey(), avroRecord);
+            filter.add(record.getRecordKey());
+          } else {
+            writer.writeAvro(record.getRecordKey(), avroRecord);
+          }
+        }
+      }
+    } else if (HoodieTableConfig.BASE_FILE_FORMAT.defaultValue().equals(HoodieFileFormat.ORC)) {
+      Configuration conf = new Configuration();
+      int orcStripSize = Integer.parseInt(HoodieStorageConfig.ORC_STRIPE_SIZE.defaultValue());
+      int orcBlockSize = Integer.parseInt(HoodieStorageConfig.ORC_BLOCK_SIZE.defaultValue());
+      int maxFileSize = Integer.parseInt(HoodieStorageConfig.ORC_FILE_MAX_SIZE.defaultValue());
+      HoodieOrcConfig config = new HoodieOrcConfig(conf, CompressionKind.ZLIB, orcStripSize, orcBlockSize, maxFileSize, filter);
+      try (HoodieOrcWriter writer = new HoodieOrcWriter(
+          currentInstantTime,
+          new Path(Paths.get(basePath, partition, fileName).toString()),
+          config, schema, contextSupplier)) {
+        int seqId = 1;
+        for (HoodieRecord record : records) {
+          GenericRecord avroRecord = (GenericRecord) record.getData().getInsertValue(schema).get();
+          HoodieAvroUtils.addCommitMetadataToRecord(avroRecord, currentInstantTime, String.valueOf(seqId++));
+          HoodieAvroUtils.addHoodieKeyToRecord(avroRecord, record.getRecordKey(), record.getPartitionPath(), fileName);
+          writer.writeAvro(record.getRecordKey(), avroRecord);
+          filter.add(record.getRecordKey());
+        }
       }
     }
 
     return this;
   }
 
-  public HoodieWriteableTestTable withLogAppends(HoodieRecord... records) throws Exception {
-    return withLogAppends(Arrays.asList(records));
-  }
-
-  public HoodieWriteableTestTable withLogAppends(List<HoodieRecord> records) throws Exception {
-    for (List<HoodieRecord> groupedRecords: records.stream()
+  public Map<String, List<HoodieLogFile>> withLogAppends(List<HoodieRecord> records) throws Exception {
+    Map<String, List<HoodieLogFile>> partitionToLogfilesMap = new HashMap<>();
+    for (List<HoodieRecord> groupedRecords : records.stream()
         .collect(Collectors.groupingBy(HoodieRecord::getCurrentLocation)).values()) {
-      appendRecordsToLogFile(groupedRecords);
+      final Pair<String, HoodieLogFile> appendedLogFile = appendRecordsToLogFile(groupedRecords);
+      partitionToLogfilesMap.computeIfAbsent(
+          appendedLogFile.getKey(), k -> new ArrayList<>()).add(appendedLogFile.getValue());
     }
-    return this;
+    return partitionToLogfilesMap;
   }
 
-  private void appendRecordsToLogFile(List<HoodieRecord> groupedRecords) throws Exception {
+  private Pair<String, HoodieLogFile> appendRecordsToLogFile(List<HoodieRecord> groupedRecords) throws Exception {
     String partitionPath = groupedRecords.get(0).getPartitionPath();
     HoodieRecordLocation location = groupedRecords.get(0).getCurrentLocation();
     try (HoodieLogFormat.Writer logWriter = HoodieLogFormat.newWriterBuilder().onParentPath(new Path(basePath, partitionPath))
@@ -137,6 +183,7 @@ public class HoodieWriteableTestTable extends HoodieTestTable {
           return null;
         }
       }).collect(Collectors.toList()), header));
+      return Pair.of(partitionPath, logWriter.getLogFile());
     }
   }
 }

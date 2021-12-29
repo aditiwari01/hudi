@@ -18,8 +18,6 @@
 
 package org.apache.hudi.common.table;
 
-import java.io.IOException;
-
 import org.apache.avro.Schema;
 import org.apache.avro.Schema.Field;
 import org.apache.avro.SchemaCompatibility;
@@ -36,6 +34,7 @@ import org.apache.hudi.common.table.log.block.HoodieLogBlock;
 import org.apache.hudi.common.table.timeline.HoodieActiveTimeline;
 import org.apache.hudi.common.table.timeline.HoodieInstant;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.util.Functions.Function1;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.StringUtils;
 import org.apache.hudi.common.util.collection.Pair;
@@ -49,16 +48,24 @@ import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.metadata.ParquetMetadata;
 import org.apache.parquet.schema.MessageType;
 
+import java.io.IOException;
+
 /**
  * Helper class to read schema from data files and log files and to convert it between different formats.
  */
 public class TableSchemaResolver {
 
   private static final Logger LOG = LogManager.getLogger(TableSchemaResolver.class);
-  private HoodieTableMetaClient metaClient;
+  private final HoodieTableMetaClient metaClient;
+  private final boolean withOperationField;
 
   public TableSchemaResolver(HoodieTableMetaClient metaClient) {
+    this(metaClient, false);
+  }
+
+  public TableSchemaResolver(HoodieTableMetaClient metaClient, boolean withOperationField) {
     this.metaClient = metaClient;
+    this.withOperationField = withOperationField;
   }
 
   /**
@@ -77,7 +84,8 @@ public class TableSchemaResolver {
           // If this is COW, get the last commit and read the schema from a file written in the
           // last commit
           HoodieInstant lastCommit =
-              activeTimeline.getCommitsTimeline().filterCompletedInstants().lastInstant().orElseThrow(() -> new InvalidTableException(metaClient.getBasePath()));
+              activeTimeline.getCommitsTimeline().filterCompletedInstantsWithCommitMetadata()
+                      .lastInstant().orElseThrow(() -> new InvalidTableException(metaClient.getBasePath()));
           HoodieCommitMetadata commitMetadata = HoodieCommitMetadata
               .fromBytes(activeTimeline.getInstantDetails(lastCommit).get(), HoodieCommitMetadata.class);
           String filePath = commitMetadata.getFileIdAndFullPaths(metaClient.getBasePath()).values().stream().findAny()
@@ -89,8 +97,8 @@ public class TableSchemaResolver {
           // If this is MOR, depending on whether the latest commit is a delta commit or
           // compaction commit
           // Get a datafile written and get the schema from that file
-          Option<HoodieInstant> lastCompactionCommit =
-              metaClient.getActiveTimeline().getCommitTimeline().filterCompletedInstants().lastInstant();
+          Option<HoodieInstant> lastCompactionCommit = metaClient.getActiveTimeline().getCommitTimeline()
+                  .filterCompletedInstantsWithCommitMetadata().lastInstant();
           LOG.info("Found the last compaction commit as " + lastCompactionCommit);
 
           Option<HoodieInstant> lastDeltaCommit;
@@ -141,7 +149,7 @@ public class TableSchemaResolver {
     }
   }
 
-  private Schema getTableAvroSchemaFromDataFile() throws Exception {
+  public Schema getTableAvroSchemaFromDataFile() throws Exception {
     return convertParquetSchemaToAvro(getTableParquetSchemaFromDataFile());
   }
 
@@ -164,7 +172,22 @@ public class TableSchemaResolver {
    */
   public Schema getTableAvroSchema(boolean includeMetadataFields) throws Exception {
     Option<Schema> schemaFromCommitMetadata = getTableSchemaFromCommitMetadata(includeMetadataFields);
-    return schemaFromCommitMetadata.isPresent() ? schemaFromCommitMetadata.get() : getTableAvroSchemaFromDataFile();
+    if (schemaFromCommitMetadata.isPresent()) {
+      return schemaFromCommitMetadata.get();
+    }
+    Option<Schema> schemaFromTableConfig = metaClient.getTableConfig().getTableCreateSchema();
+    if (schemaFromTableConfig.isPresent()) {
+      if (includeMetadataFields) {
+        return HoodieAvroUtils.addMetadataFields(schemaFromTableConfig.get(), withOperationField);
+      } else {
+        return schemaFromTableConfig.get();
+      }
+    }
+    if (includeMetadataFields) {
+      return getTableAvroSchemaFromDataFile();
+    } else {
+      return HoodieAvroUtils.removeMetadataFields(getTableAvroSchemaFromDataFile());
+    }
   }
 
   /**
@@ -186,10 +209,7 @@ public class TableSchemaResolver {
    * @throws Exception
    */
   public Schema getTableAvroSchemaWithoutMetadataFields() throws Exception {
-    HoodieTimeline timeline = metaClient.getActiveTimeline().getCommitsTimeline().filterCompletedInstants();
-    Option<Schema> schemaFromCommitMetadata = getTableSchemaFromCommitMetadata(timeline.lastInstant().get(), false);
-    return schemaFromCommitMetadata.isPresent() ? schemaFromCommitMetadata.get() :
-           HoodieAvroUtils.removeMetadataFields(getTableAvroSchemaFromDataFile());
+    return getTableAvroSchema(false);
   }
 
   /**
@@ -201,8 +221,14 @@ public class TableSchemaResolver {
    */
   public Schema getTableAvroSchemaWithoutMetadataFields(HoodieInstant instant) throws Exception {
     Option<Schema> schemaFromCommitMetadata = getTableSchemaFromCommitMetadata(instant, false);
-    return schemaFromCommitMetadata.isPresent() ? schemaFromCommitMetadata.get() :
-        HoodieAvroUtils.removeMetadataFields(getTableAvroSchemaFromDataFile());
+    if (schemaFromCommitMetadata.isPresent()) {
+      return schemaFromCommitMetadata.get();
+    }
+    Option<Schema> schemaFromTableConfig = metaClient.getTableConfig().getTableCreateSchema();
+    if (schemaFromTableConfig.isPresent()) {
+      return schemaFromTableConfig.get();
+    }
+    return HoodieAvroUtils.removeMetadataFields(getTableAvroSchemaFromDataFile());
   }
 
   /**
@@ -212,7 +238,11 @@ public class TableSchemaResolver {
    */
   private Option<Schema> getTableSchemaFromCommitMetadata(boolean includeMetadataFields) {
     HoodieTimeline timeline = metaClient.getActiveTimeline().getCommitsTimeline().filterCompletedInstants();
-    return getTableSchemaFromCommitMetadata(timeline.lastInstant().get(), includeMetadataFields);
+    if (timeline.lastInstant().isPresent()) {
+      return getTableSchemaFromCommitMetadata(timeline.lastInstant().get(), includeMetadataFields);
+    } else {
+      return Option.empty();
+    }
   }
 
 
@@ -234,7 +264,7 @@ public class TableSchemaResolver {
 
       Schema schema = new Schema.Parser().parse(existingSchemaStr);
       if (includeMetadataFields) {
-        schema = HoodieAvroUtils.addMetadataFields(schema);
+        schema = HoodieAvroUtils.addMetadataFields(schema, withOperationField);
       }
       return Option.of(schema);
     } catch (Exception e) {
@@ -330,7 +360,7 @@ public class TableSchemaResolver {
       for (final Field newSchemaField : newSchema.getFields()) {
         final Field oldSchemaField = SchemaCompatibility.lookupWriterField(oldSchema, newSchemaField);
         if (oldSchemaField == null) {
-          if (newSchemaField.defaultValue() == null) {
+          if (newSchemaField.defaultVal() == null) {
             // C3: newly added field in newSchema does not have a default value
             return false;
           }
@@ -351,6 +381,56 @@ public class TableSchemaResolver {
 
   public static boolean isSchemaCompatible(String oldSchema, String newSchema) {
     return isSchemaCompatible(new Schema.Parser().parse(oldSchema), new Schema.Parser().parse(newSchema));
+  }
+
+  /**
+   * Get latest schema either from incoming schema or table schema.
+   * @param writeSchema incoming batch's write schema.
+   * @param convertTableSchemaToAddNamespace {@code true} if table schema needs to be converted. {@code false} otherwise.
+   * @param converterFn converter function to be called over table schema (to add namespace may be). Each caller can decide if any conversion is required.
+   * @return the latest schema.
+   */
+  public Schema getLatestSchema(Schema writeSchema, boolean convertTableSchemaToAddNamespace,
+      Function1<Schema, Schema> converterFn) {
+    Schema latestSchema = writeSchema;
+    try {
+      if (metaClient.isTimelineNonEmpty()) {
+        Schema tableSchema = getTableAvroSchemaWithoutMetadataFields();
+        if (convertTableSchemaToAddNamespace && converterFn != null) {
+          tableSchema = converterFn.apply(tableSchema);
+        }
+        if (writeSchema.getFields().size() < tableSchema.getFields().size() && isSchemaCompatible(writeSchema, tableSchema)) {
+          // if incoming schema is a subset (old schema) compared to table schema. For eg, one of the
+          // ingestion pipeline is still producing events in old schema
+          latestSchema = tableSchema;
+          LOG.debug("Using latest table schema to rewrite incoming records " + tableSchema.toString());
+        }
+      }
+    } catch (IllegalArgumentException | InvalidTableException e) {
+      LOG.warn("Could not find any commits, falling back to using incoming batch's write schema");
+    } catch (Exception e) {
+      LOG.warn("Unknown exception thrown " + e.getMessage() + ", Falling back to using incoming batch's write schema");
+    }
+    return latestSchema;
+  }
+
+
+  /**
+   * Get Last commit's Metadata.
+   */
+  public Option<HoodieCommitMetadata> getLatestCommitMetadata() {
+    try {
+      HoodieTimeline timeline = metaClient.getActiveTimeline().getCommitsTimeline().filterCompletedInstants();
+      if (timeline.lastInstant().isPresent()) {
+        HoodieInstant instant = timeline.lastInstant().get();
+        byte[] data = timeline.getInstantDetails(instant).get();
+        return Option.of(HoodieCommitMetadata.fromBytes(data, HoodieCommitMetadata.class));
+      } else {
+        return Option.empty();
+      }
+    } catch (Exception e) {
+      throw new HoodieException("Failed to get commit metadata", e);
+    }
   }
 
   /**

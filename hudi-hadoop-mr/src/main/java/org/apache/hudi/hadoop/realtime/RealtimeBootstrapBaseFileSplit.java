@@ -18,6 +18,8 @@
 
 package org.apache.hudi.hadoop.realtime;
 
+import org.apache.hudi.common.model.HoodieLogFile;
+import org.apache.hudi.common.util.Option;
 import org.apache.hudi.hadoop.BootstrapBaseFileSplit;
 
 import org.apache.hadoop.mapred.FileSplit;
@@ -25,7 +27,9 @@ import org.apache.hadoop.mapred.FileSplit;
 import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * Realtime File Split with external base file.
@@ -33,6 +37,7 @@ import java.util.List;
 public class RealtimeBootstrapBaseFileSplit extends BootstrapBaseFileSplit implements RealtimeSplit {
 
   private List<String> deltaLogPaths;
+  private List<HoodieLogFile> deltaLogFiles = new ArrayList<>();
 
   private String maxInstantTime;
 
@@ -42,11 +47,12 @@ public class RealtimeBootstrapBaseFileSplit extends BootstrapBaseFileSplit imple
     super();
   }
 
-  public RealtimeBootstrapBaseFileSplit(FileSplit baseSplit, String basePath, List<String> deltaLogPaths,
+  public RealtimeBootstrapBaseFileSplit(FileSplit baseSplit, String basePath, List<HoodieLogFile> deltaLogFiles,
                                         String maxInstantTime, FileSplit externalFileSplit) throws IOException {
     super(baseSplit, externalFileSplit);
     this.maxInstantTime = maxInstantTime;
-    this.deltaLogPaths = deltaLogPaths;
+    this.deltaLogFiles = deltaLogFiles;
+    this.deltaLogPaths = deltaLogFiles.stream().map(entry -> entry.getPath().toString()).collect(Collectors.toList());
     this.basePath = basePath;
   }
 
@@ -68,6 +74,11 @@ public class RealtimeBootstrapBaseFileSplit extends BootstrapBaseFileSplit imple
   }
 
   @Override
+  public List<HoodieLogFile> getDeltaLogFiles() {
+    return deltaLogFiles;
+  }
+
+  @Override
   public String getMaxCommitTime() {
     return maxInstantTime;
   }
@@ -75,6 +86,11 @@ public class RealtimeBootstrapBaseFileSplit extends BootstrapBaseFileSplit imple
   @Override
   public String getBasePath() {
     return basePath;
+  }
+
+  @Override
+  public Option<HoodieVirtualKeyInfo> getHoodieVirtualKeyInfo() {
+    return Option.empty();
   }
 
   @Override
@@ -91,4 +107,8 @@ public class RealtimeBootstrapBaseFileSplit extends BootstrapBaseFileSplit imple
   public void setBasePath(String basePath) {
     this.basePath = basePath;
   }
+
+  @Override
+  public void setHoodieVirtualKeyInfo(Option<HoodieVirtualKeyInfo> hoodieVirtualKeyInfo) {}
+
 }
